@@ -22,13 +22,15 @@ enum LogiUsageBootstrap {
 
     static func refreshAll() {
         // 1. Button bindings (直读 Options, 不依赖 ButtonUtils 缓存失效的订阅顺序)
-        let buttonCodes: Set<UInt16> = Set(
-            Options.shared.buttons.binding
-                .filter { $0.isEnabled && $0.triggerEvent.type == .mouse }
-                .map { $0.triggerEvent.code }
-                .filter { LogiCenter.shared.isLogiCode($0) }
-        )
-        LogiCenter.shared.setUsage(source: .buttonBinding, codes: buttonCodes)
+        // 全局绑定 + 所有不继承全局的 per-app 绑定 (Application.buttons) 取并集:
+        // divert 是设备级的, 只要任一应用用到该 Logi 按键就需要 divert
+        var allBindings = Options.shared.buttons.binding
+        let appsForButtons = Options.shared.application.applications
+        for i in 0..<appsForButtons.count {
+            guard let app = appsForButtons.get(by: i), let appButtons = app.buttons else { continue }
+            allBindings.append(contentsOf: appButtons.binding)
+        }
+        LogiCenter.shared.setUsage(source: .buttonBinding, codes: logiButtonCodes(in: allBindings))
 
         // 2. Global scroll
         for role in ScrollRole.allCases {
@@ -54,6 +56,15 @@ enum LogiUsageBootstrap {
             }
         }
         lastPushedAppPaths = currentPaths
+    }
+
+    static func logiButtonCodes(in bindings: [ButtonBinding]) -> Set<UInt16> {
+        return Set(
+            bindings
+                .filter { $0.isEnabled && $0.triggerEvent.type == .mouse }
+                .map { $0.triggerEvent.code }
+                .filter { LogiCenter.shared.isLogiCode($0) }
+        )
     }
 
     private static func globalScrollCodes(role: ScrollRole) -> Set<UInt16> {

@@ -37,6 +37,8 @@ class PreferencesApplicationViewController: NSViewController {
         Utils.attachImage(to: manuallySelectFromFinderMenuItem, withImage: #imageLiteral(resourceName: "SF.tray"))
         // 设置表格代理
         tableView.delegate = self
+        // 按钮列 (分应用按钮绑定)
+        setupButtonsColumn()
         // 读取设置
         syncViewWithOptions()
         // 初始化按钮状态
@@ -118,6 +120,77 @@ extension PreferencesApplicationViewController: NSTableViewDelegate, NSTableView
     fileprivate enum CellIdentifiers {
         static let applicationCell = "applicationCell"
         static let scrollingCell = "scrollingCell"
+        static let buttonsCell = "buttonsCell"
+    }
+    // 按钮列宽 (与 Storyboard 中滚动列一致)
+    private static let buttonsColumnWidth: CGFloat = 90
+    // 按钮列表头标签相对表头中心的偏移 (滚动列标签为 164, 按钮列位于其左侧一列)
+    private static let buttonsHeaderCenterXOffset: CGFloat = 74
+
+    /// 在代码中追加 "按钮" 列 (位于应用列与滚动列之间), 避免改动 Storyboard 的表格结构
+    func setupButtonsColumn() {
+        let identifier = NSUserInterfaceItemIdentifier(CellIdentifiers.buttonsCell)
+        guard tableView.tableColumns.first(where: { $0.identifier == identifier }) == nil else { return }
+        // 从应用列让出宽度, 保持滚动列位置不变
+        if let applicationColumn = tableView.tableColumns.first(where: { $0.identifier.rawValue == CellIdentifiers.applicationCell }) {
+            applicationColumn.width = max(applicationColumn.minWidth, applicationColumn.width - Self.buttonsColumnWidth)
+        }
+        let column = NSTableColumn(identifier: identifier)
+        column.width = Self.buttonsColumnWidth
+        column.minWidth = 10
+        column.maxWidth = 1000
+        column.resizingMask = []
+        tableView.addTableColumn(column)
+        if let scrollingIndex = tableView.tableColumns.firstIndex(where: { $0.identifier.rawValue == CellIdentifiers.scrollingCell }) {
+            tableView.moveColumn(tableView.tableColumns.count - 1, toColumn: scrollingIndex)
+        }
+        // 自定义表头 (tableHead) 中追加 "按钮" 标签
+        let headerLabel = NSTextField(labelWithString: NSLocalizedString("app_buttons_column_title", comment: "Application list: header of the per-app button bindings column"))
+        headerLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        headerLabel.textColor = .secondaryLabelColor
+        headerLabel.alignment = .center
+        headerLabel.translatesAutoresizingMaskIntoConstraints = false
+        tableHead.addSubview(headerLabel)
+        NSLayoutConstraint.activate([
+            headerLabel.centerXAnchor.constraint(equalTo: tableHead.centerXAnchor, constant: Self.buttonsHeaderCenterXOffset),
+            headerLabel.centerYAnchor.constraint(equalTo: tableHead.centerYAnchor),
+        ])
+    }
+
+    /// 构建按钮列的 Cell (纯代码, 样式对齐滚动列的设置按钮)
+    private func makeButtonsCell(row: Int) -> NSView {
+        let identifier = NSUserInterfaceItemIdentifier(CellIdentifiers.buttonsCell)
+        let cell: NSTableCellView
+        let button: NSButton
+        if let reused = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView,
+           let reusedButton = reused.subviews.first as? NSButton {
+            cell = reused
+            button = reusedButton
+        } else {
+            cell = NSTableCellView()
+            cell.identifier = identifier
+            button = NSButton(title: "", target: nil, action: nil)
+            button.bezelStyle = .roundRect
+            button.imagePosition = .imageOnly
+            button.imageScaling = .scaleProportionallyDown
+            button.image = NSImage(named: "SF.button.horizontal.top.press")
+            button.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(button)
+            NSLayoutConstraint.activate([
+                button.centerXAnchor.constraint(equalTo: cell.centerXAnchor),
+                button.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
+                button.widthAnchor.constraint(equalToConstant: 39),
+                button.heightAnchor.constraint(lessThanOrEqualToConstant: 25),
+            ])
+        }
+        button.tag = row
+        button.target = self
+        button.action = #selector(settingButtonsButtonClick)
+        let hasOwnButtons = Options.shared.application.applications.get(by: row)?.buttons != nil
+        button.toolTip = hasOwnButtons
+            ? NSLocalizedString("app_buttons_tooltip_custom", comment: "Application list: tooltip when the app has its own button bindings")
+            : NSLocalizedString("app_buttons_tooltip_inherit", comment: "Application list: tooltip when the app inherits global button bindings")
+        return cell
     }
     // 切换无数据显示
     func toggleNoDataHint() {
@@ -143,8 +216,23 @@ extension PreferencesApplicationViewController: NSTableViewDelegate, NSTableView
         // 展示到指定位置
         present(scrollingWithApplicationViewController, asPopoverRelativeTo: sender.bounds, of: sender, preferredEdge: NSRectEdge.maxX, behavior: NSPopover.Behavior.transient)
     }
+    // 点击设置: 按钮
+    @objc func settingButtonsButtonClick(_ sender: NSButton!) {
+        let row = sender.tag
+        guard let application = Options.shared.application.applications.get(by: row) else { return }
+        let buttonsWithApplicationViewController = PreferencesButtonsWithApplicationViewController(application: application)
+        buttonsWithApplicationViewController.onDismiss = { [weak self] in
+            guard let self = self, row < self.tableView.numberOfRows else { return }
+            self.tableView.reloadData(forRowIndexes: [row], columnIndexes: IndexSet(integersIn: 0..<self.tableView.numberOfColumns))
+        }
+        // semitransient: 弹出确认框 / 录制按键时不会意外关闭
+        present(buttonsWithApplicationViewController, asPopoverRelativeTo: sender.bounds, of: sender, preferredEdge: NSRectEdge.maxX, behavior: NSPopover.Behavior.semitransient)
+    }
     // 构建表格数据 (循环生成行)
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        if tableColumn?.identifier.rawValue == CellIdentifiers.buttonsCell {
+            return makeButtonsCell(row: row)
+        }
         guard let tableColumnIdentifier = tableColumn?.identifier,
               let cell = tableView.makeView(withIdentifier: tableColumnIdentifier, owner: self) as? NSTableCellView,
               let application = Options.shared.application.applications.get(by: row) else {

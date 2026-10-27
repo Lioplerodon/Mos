@@ -15,6 +15,10 @@ class PreferencesButtonsViewController: NSViewController {
 
     // MARK: - Data
     private var buttonBindings: [ButtonBinding] = []
+    /// 分应用模式: 非 nil 时编辑该应用的按钮绑定 (Application.buttons), nil 时编辑全局绑定
+    var currentTargetApplication: Application?
+    /// 分应用模式下继承全局时, 拦截列表区域的点击 (列表仅作只读展示)
+    private var inheritBlockerView: InheritInteractionBlockerView?
     private var currentOpenTargetPopover: OpenTargetConfigPopover?
 
     // MARK: - UI Elements
@@ -90,10 +94,12 @@ class PreferencesButtonsViewController: NSViewController {
 
     // 添加
     @IBAction func addItemClick(_ sender: NSButton) {
+        guard isEditable else { return }
         recorder.startRecording(from: sender)
     }
     // 删除
     @IBAction func removeItemClick(_ sender: NSButton) {
+        guard isEditable else { return }
         // 确保选择了行
         guard tableView.selectedRow != -1 else { return }
         // 统一通过 removeButtonBinding 处理删除逻辑
@@ -108,28 +114,71 @@ class PreferencesButtonsViewController: NSViewController {
  * 数据持久化
  **/
 extension PreferencesButtonsViewController {
+    /// 是否允许编辑: 全局模式始终可编辑; 分应用模式仅在不继承全局 (buttons != nil) 时可编辑
+    var isEditable: Bool {
+        guard let application = currentTargetApplication else { return true }
+        return application.buttons != nil
+    }
+
     // 从 Options 加载到界面
     func loadOptionsToView() {
-        buttonBindings = Options.shared.buttons.binding
+        // 分应用模式下继承全局时, 展示全局绑定 (只读)
+        buttonBindings = ButtonUtils.effectiveBindings(for: currentTargetApplication)
         tableView.reloadData()
         toggleNoDataHint()
+        updateEditableState()
     }
 
     // 保存界面到 Options
     // 缓存失效与 HID++ divert 用量同步由 Options 订阅自动完成 (ButtonUtils / LogiUsageBootstrap)
     func syncViewWithOptions() {
-        Options.shared.buttons.binding = buttonBindings
+        if let application = currentTargetApplication {
+            // 继承全局时不写入 (界面已只读, 这里兜底)
+            application.buttons?.binding = buttonBindings
+        } else {
+            Options.shared.buttons.binding = buttonBindings
+        }
     }
 
     // 更新删除按钮状态
     func updateDelButtonState() {
-        delButton.isEnabled = tableView.selectedRow != -1
+        delButton.isEnabled = isEditable && tableView.selectedRow != -1
+    }
+
+    /// 同步可编辑状态 (分应用模式切换继承时调用)
+    func updateEditableState() {
+        guard isViewLoaded else { return }
+        let editable = isEditable
+        addButton.isEnabled = editable
+        createButton.isEnabled = editable
+        createButton.alphaValue = editable ? 1 : 0.5
+        updateDelButtonState()
+        if !editable { tableView.deselectAll(nil) }
+        // 列表区域: 只读时半透明并拦截点击
+        if let scrollView = tableView.enclosingScrollView {
+            scrollView.alphaValue = editable ? 1 : 0.5
+            if inheritBlockerView == nil, currentTargetApplication != nil {
+                let blocker = InheritInteractionBlockerView(frame: scrollView.frame)
+                blocker.translatesAutoresizingMaskIntoConstraints = false
+                blocker.scrollTarget = scrollView
+                view.addSubview(blocker, positioned: .above, relativeTo: scrollView)
+                NSLayoutConstraint.activate([
+                    blocker.leadingAnchor.constraint(equalTo: scrollView.leadingAnchor),
+                    blocker.trailingAnchor.constraint(equalTo: scrollView.trailingAnchor),
+                    blocker.topAnchor.constraint(equalTo: scrollView.topAnchor),
+                    blocker.bottomAnchor.constraint(equalTo: scrollView.bottomAnchor),
+                ])
+                inheritBlockerView = blocker
+            }
+            inheritBlockerView?.isBlocking = !editable
+        }
     }
 
     // 设置录制按钮回调
     private func setupRecordButtonCallback() {
         createButton.onMouseDown = { [weak self] target in
-            self?.recorder.startRecording(from: target)
+            guard let self = self, self.isEditable else { return }
+            self.recorder.startRecording(from: target)
         }
     }
     
@@ -553,5 +602,25 @@ extension PreferencesButtonsViewController: KeyRecorderDelegate {
         let recordedEvent = RecordedEvent(from: event)
         let diagnosis = LogiCenter.shared.buttonCaptureDiagnosis(forMosCode: event.code)
         return recordedEvent.normalizedForButtonBinding(diagnosis: diagnosis)
+    }
+}
+
+/// 透明覆盖层: isBlocking 为 true 时吞掉其区域内的鼠标事件
+/// (用于分应用按钮设置继承全局时, 让列表只读但仍可见)
+final class InheritInteractionBlockerView: NSView {
+    var isBlocking = false
+    weak var scrollTarget: NSScrollView?
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        guard isBlocking else { return nil }
+        return super.hitTest(point)
+    }
+
+    override func mouseDown(with event: NSEvent) {}
+    override func rightMouseDown(with event: NSEvent) {}
+    override func otherMouseDown(with event: NSEvent) {}
+    override func scrollWheel(with event: NSEvent) {
+        // 滚动仍交给下方列表, 便于查看继承的绑定
+        scrollTarget?.scrollWheel(with: event)
     }
 }
